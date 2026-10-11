@@ -203,8 +203,30 @@ async def call_agent_llm(
     # extract JSON from potentially-markdown-wrapped response
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if json_match:
-        return json.loads(json_match.group())
-    raise ValueError(f"No JSON in LLM response: {raw[:200]}")
+        blob = json_match.group()
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError:
+            # LLM put raw LaTeX in JSON strings (e.g. \sqrt, \frac) which are
+            # invalid JSON escapes. Fix by replacing lone backslashes with \\
+            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', blob)
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                # Last resort: extract fields with regex directly from raw text
+                result = {}
+                for field in ('answer', 'query', 'key', 'public_content', 'is_complete', 'final_answer'):
+                    m = re.search(rf'"{field}"\s*:\s*"(.*?)"(?=\s*[,}}])', blob, re.DOTALL)
+                    if m:
+                        result[field] = m.group(1)
+                    else:
+                        m2 = re.search(rf'"{field}"\s*:\s*(true|false|\d+)', blob)
+                        if m2:
+                            v = m2.group(1)
+                            result[field] = True if v == 'true' else False if v == 'false' else int(v)
+                if result:
+                    return result
+                raise ValueError(f"Could not parse JSON from LLM response: {raw[:200]}")
 
 
 # ── Mock mode — scripted responses (no LLM needed) ────────────────────────────
