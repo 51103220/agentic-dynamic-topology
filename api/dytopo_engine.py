@@ -143,12 +143,14 @@ You MUST output ONLY a valid JSON object with these exact fields:
 "q_vector": "String. REQUIRED. What you need next (query descriptor).",
 "k_vector": "String. REQUIRED. What you provide (key descriptor).",
 "is_complete": Boolean,
-"next_goal": "String"
+"next_goal": "String",
+"final_answer": "String. REQUIRED when is_complete=true. Copy the EXACT final answer here: for code tasks copy the complete Python function(s); for math tasks copy only the final numeric or symbolic answer (e.g. 42, 3/4, \\sqrt{{2}}). Empty string when is_complete=false."
 }}
 CRITICAL RULES:
 1. Primary focus: Workflow Orchestrator. Decide if the task is COMPLETE.
 2. Strict constraint: Only set is_complete=True if a complete solution exists AND it has been verified.
-3. Analyze all agent contributions from your role's perspective."""
+3. When is_complete=true you MUST populate final_answer with the exact solution — not a summary.
+4. Analyze all agent contributions from your role's perspective."""
 
 
 def _build_user_prompt(agent: Agent, goal: str, round_t: int,
@@ -512,11 +514,26 @@ async def run_dytopo(
                 is_complete = bool(mgr_raw.get("is_complete", False))
                 next_goal = mgr_raw.get("next_goal", current_goal)
                 if is_complete:
-                    final_answer = mgr_raw.get("public_content", "")
+                    # Prefer explicit final_answer field; fall back to best worker output
+                    final_answer = mgr_raw.get("final_answer", "").strip()
+                    if not final_answer:
+                        # Fall back: pick best worker output (longest code block or content)
+                        for ao in agent_outputs:
+                            if ao.role == "Manager":
+                                continue
+                            if "```" in ao.public_content or len(ao.public_content) > len(final_answer):
+                                final_answer = ao.public_content
+                    if not final_answer:
+                        final_answer = mgr_raw.get("public_content", "")
             else:
                 # no explicit manager — use heuristic after max_rounds
                 is_complete = round_t >= cfg.max_rounds - 1
                 next_goal = current_goal
+                if is_complete:
+                    # pick best worker: prefer code blocks, then longest content
+                    for ao in agent_outputs:
+                        if "```" in ao.public_content or len(ao.public_content) > len(final_answer or ""):
+                            final_answer = ao.public_content
 
         result = RoundResult(
             round=round_t,
