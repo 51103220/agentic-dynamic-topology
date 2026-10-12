@@ -480,9 +480,11 @@ async def run_dytopo(
         for i, (a, raw) in enumerate(zip(agents, outputs_raw)):
             in_neighbors = [j for j in range(len(agents)) if A[j, i] == 1]
 
-            # update memory with own output only — neighbor content arrives via call_agent_llm args
+            # update memory: own output + neighbor public_content (persists across rounds per §3.3)
             pub = raw.get("public_content", "")
             a.memory.append(f"Round {round_t} self: {pub[:200]}")
+            for j in in_neighbors:
+                a.memory.append(f"Round {round_t} from {agents[j].role}: {outputs_raw[j].get('public_content','')[:200]}")
 
             agent_outputs.append(AgentOutput(
                 id=i,
