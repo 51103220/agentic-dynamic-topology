@@ -453,9 +453,15 @@ async def run_dytopo(
                 for a in agents
             ])
         else:
-            # Real LLM: for round>0 pass neighbor messages (simplified: empty first round)
+            # Real LLM: pass neighbor messages based on topology from previous round
             outputs_raw = await asyncio.gather(*[
-                call_agent_llm(a, current_goal, round_t, [], cfg)
+                call_agent_llm(
+                    a, current_goal, round_t,
+                    [(j, agents[j].role, agents[j].memory[-1] if agents[j].memory else "")
+                     for j in range(len(agents))
+                     if j != a.id and len(a.memory) > 1],  # neighbors from memory
+                    cfg,
+                )
                 for a in agents
             ])
 
@@ -489,10 +495,15 @@ async def run_dytopo(
         # Track best primary role output across all rounds
         primary_roles = {"Developer", "Solver"}
         for ao in agent_outputs:
-            if ao.role in primary_roles and "```" in ao.public_content:
-                best_primary_answer = ao.public_content  # code block wins always
-            elif ao.role in primary_roles and not best_primary_answer:
-                best_primary_answer = ao.public_content  # fallback if no code yet
+            if ao.role in primary_roles:
+                # For code tasks: prefer code blocks; always update to latest
+                if "```" in ao.public_content:
+                    best_primary_answer = ao.public_content
+                elif not best_primary_answer:
+                    best_primary_answer = ao.public_content
+                # For math tasks: always update to latest Solver output (last round = most refined)
+                elif cfg.task_type == "math" and ao.role == "Solver":
+                    best_primary_answer = ao.public_content
 
         # In mock mode: use scripted completion logic
         # In real mode: manager agent decides
