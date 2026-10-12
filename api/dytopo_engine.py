@@ -111,12 +111,12 @@ CODE_ROLES = ["Developer", "Researcher", "Tester", "Designer"]
 MATH_ROLES = ["ProblemParser", "Solver", "Verifier", "Manager"]
 
 ROLE_DESCRIPTIONS = {
-    "Developer":     "Implement complete, runnable Python code. If using classes, provide independent functions as entry points.",
+    "Developer":     "Write ONLY the complete Python function implementation. Output the raw code inside a ```python ... ``` block. No explanations, no descriptions — just the working code with the correct function name and signature from the problem statement.",
     "Researcher":    "Identify standard algorithms and time complexity. Output conclusions without full derivation.",
     "Tester":        "Provide critical test cases and expected results. Describe testing logic rather than full execution logs.",
     "Designer":      "Design API interfaces and class structures. Only show method signatures and type hints.",
     "ProblemParser": "Analyze the problem statement, identify known conditions, define the solving target, and break down the solving steps.",
-    "Solver":        "Execute specific mathematical calculations, symbolic reasoning, or theorem calls. Provide detailed step-by-step solutions.",
+    "Solver":        "Solve the math problem step by step. End your response with the final answer on its own line in the format: Answer: <value>. The value must be a number or expression (e.g. 42, 3/4, \\sqrt{2}).",
     "Verifier":      "Check the rationality of each derivation step, identify logical loopholes or calculation errors.",
     "Manager":       "Orchestrate the workflow. Decide if the task is COMPLETE only when solution exists AND verification passes.",
 }
