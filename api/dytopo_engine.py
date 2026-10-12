@@ -443,6 +443,7 @@ async def run_dytopo(
     current_goal = goals[0]
 
     final_answer: str | None = None
+    best_primary_answer: str = ""  # tracks best Developer/Solver output across all rounds
 
     for round_t in range(cfg.max_rounds):
         # ── Phase 1: Single-Pass Inference (all agents in parallel) ──────────
@@ -485,6 +486,14 @@ async def run_dytopo(
             ))
 
         # ── Phase 5: Manager Control (Algorithm 1 lines 24-27) ───────────────
+        # Track best primary role output across all rounds
+        primary_roles = {"Developer", "Solver"}
+        for ao in agent_outputs:
+            if ao.role in primary_roles and "```" in ao.public_content:
+                best_primary_answer = ao.public_content  # code block wins always
+            elif ao.role in primary_roles and not best_primary_answer:
+                best_primary_answer = ao.public_content  # fallback if no code yet
+
         # In mock mode: use scripted completion logic
         # In real mode: manager agent decides
         is_complete = False
@@ -514,55 +523,16 @@ async def run_dytopo(
                 is_complete = bool(mgr_raw.get("is_complete", False))
                 next_goal = mgr_raw.get("next_goal", current_goal)
                 if is_complete:
-                    # Prefer explicit final_answer field; fall back to best worker output
+                    # Prefer explicit final_answer field; fall back to best primary role output
                     final_answer = mgr_raw.get("final_answer", "").strip()
                     if not final_answer:
-                        primary_roles = {"Developer", "Solver"}
-                        best = ""
-                        for ao in agent_outputs:
-                            if ao.role == "Manager": continue
-                            if ao.role in primary_roles and "```" in ao.public_content:
-                                best = ao.public_content; break
-                        if not best:
-                            for ao in agent_outputs:
-                                if ao.role != "Manager" and "```" in ao.public_content:
-                                    best = ao.public_content; break
-                        if not best:
-                            for ao in agent_outputs:
-                                if ao.role in primary_roles:
-                                    best = ao.public_content; break
-                        if not best:
-                            best = mgr_raw.get("public_content", "")
-                        final_answer = best
+                        final_answer = best_primary_answer or mgr_raw.get("public_content", "")
             else:
                 # no explicit manager — use heuristic after max_rounds
                 is_complete = round_t >= cfg.max_rounds - 1
                 next_goal = current_goal
                 if is_complete:
-                    # Priority: Developer/Solver with code block → any code block → Developer/Solver → longest
-                    primary_roles = {"Developer", "Solver"}
-                    best = ""
-                    # 1. Primary role with code block
-                    for ao in agent_outputs:
-                        if ao.role in primary_roles and "```" in ao.public_content:
-                            best = ao.public_content
-                            break
-                    # 2. Any agent with code block
-                    if not best:
-                        for ao in agent_outputs:
-                            if "```" in ao.public_content:
-                                best = ao.public_content
-                                break
-                    # 3. Primary role content
-                    if not best:
-                        for ao in agent_outputs:
-                            if ao.role in primary_roles:
-                                best = ao.public_content
-                                break
-                    # 4. Longest content
-                    if not best:
-                        best = max(agent_outputs, key=lambda a: len(a.public_content)).public_content
-                    final_answer = best
+                    final_answer = best_primary_answer or agent_outputs[0].public_content
 
         result = RoundResult(
             round=round_t,
