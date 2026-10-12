@@ -518,22 +518,30 @@ async def run_dytopo(
                     final_answer = mgr_raw.get("final_answer", "").strip()
                     if not final_answer:
                         # Fall back: pick best worker output (longest code block or content)
+                        best = ""
                         for ao in agent_outputs:
                             if ao.role == "Manager":
                                 continue
-                            if "```" in ao.public_content or len(ao.public_content) > len(final_answer):
-                                final_answer = ao.public_content
-                    if not final_answer:
-                        final_answer = mgr_raw.get("public_content", "")
+                            if "```" in ao.public_content:
+                                best = ao.public_content
+                                break
+                            if len(ao.public_content) > len(best):
+                                best = ao.public_content
+                        final_answer = best or mgr_raw.get("public_content", "")
             else:
                 # no explicit manager — use heuristic after max_rounds
                 is_complete = round_t >= cfg.max_rounds - 1
                 next_goal = current_goal
                 if is_complete:
                     # pick best worker: prefer code blocks, then longest content
+                    best = ""
                     for ao in agent_outputs:
-                        if "```" in ao.public_content or len(ao.public_content) > len(final_answer or ""):
-                            final_answer = ao.public_content
+                        if "```" in ao.public_content:
+                            best = ao.public_content
+                            break
+                        if len(ao.public_content) > len(best):
+                            best = ao.public_content
+                    final_answer = best or agent_outputs[0].public_content
 
         result = RoundResult(
             round=round_t,
