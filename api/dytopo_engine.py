@@ -444,6 +444,8 @@ async def run_dytopo(
 
     final_answer: str | None = None
     best_primary_answer: str = ""  # tracks best Developer/Solver output across all rounds
+    prev_outputs: list[dict] = []  # previous round outputs for neighbor message passing
+    prev_adjacency: list[list[int]] = []  # previous round adjacency
 
     for round_t in range(cfg.max_rounds):
         # ── Phase 1: Single-Pass Inference (all agents in parallel) ──────────
@@ -453,13 +455,16 @@ async def run_dytopo(
                 for a in agents
             ])
         else:
-            # Real LLM: pass neighbor messages based on topology from previous round
+            # Real LLM: pass neighbor messages from PREVIOUS round based on previous adjacency
+            # This matches Algorithm 1: agent i receives from j where A[j,i]=1 (prev round)
             outputs_raw = await asyncio.gather(*[
                 call_agent_llm(
                     a, current_goal, round_t,
-                    [(j, agents[j].role, agents[j].memory[-1] if agents[j].memory else "")
-                     for j in range(len(agents))
-                     if j != a.id and len(a.memory) > 1],  # neighbors from memory
+                    [
+                        (j, agents[j].role, prev_outputs[j].get("public_content", ""))
+                        for j in range(len(agents))
+                        if prev_adjacency and prev_adjacency[j][a.id] == 1
+                    ],
                     cfg,
                 )
                 for a in agents
@@ -553,6 +558,10 @@ async def run_dytopo(
             is_complete=is_complete,
             final_answer=final_answer if is_complete else None,
         )
+
+        # Store for next round's neighbor message passing (Algorithm 1)
+        prev_outputs = outputs_raw
+        prev_adjacency = A.tolist()
 
         yield result
 
