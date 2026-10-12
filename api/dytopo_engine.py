@@ -480,12 +480,9 @@ async def run_dytopo(
         for i, (a, raw) in enumerate(zip(agents, outputs_raw)):
             in_neighbors = [j for j in range(len(agents)) if A[j, i] == 1]
 
-            # update memory: public_content + incoming private messages
+            # update memory with own output only — neighbor content arrives via call_agent_llm args
             pub = raw.get("public_content", "")
             a.memory.append(f"Round {round_t} self: {pub[:200]}")
-            for j in in_neighbors:
-                priv = outputs_raw[j].get("public_content", "")
-                a.memory.append(f"Round {round_t} from {agents[j].role}: {priv[:200]}")
 
             agent_outputs.append(AgentOutput(
                 id=i,
@@ -546,7 +543,7 @@ async def run_dytopo(
             else:
                 # no explicit manager — use heuristic after max_rounds
                 is_complete = round_t >= cfg.max_rounds - 1
-                next_goal = current_goal
+                next_goal = current_goal  # no goal progression without Manager
                 if is_complete:
                     final_answer = best_primary_answer or agent_outputs[0].public_content
 
