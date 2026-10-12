@@ -217,18 +217,28 @@ async def call_agent_llm(
             except json.JSONDecodeError:
                 # Last resort: extract fields with regex directly from raw text
                 result = {}
-                for field in ('answer', 'query', 'key', 'public_content', 'is_complete', 'final_answer'):
-                    m = re.search(rf'"{field}"\s*:\s*"(.*?)"(?=\s*[,}}])', blob, re.DOTALL)
+                for fname in ('answer', 'query', 'key', 'public_content', 'is_complete', 'final_answer'):
+                    m = re.search(rf'"{fname}"\s*:\s*"(.*?)"(?=\s*[,}}])', blob, re.DOTALL)
                     if m:
-                        result[field] = m.group(1)
+                        result[fname] = m.group(1)
                     else:
-                        m2 = re.search(rf'"{field}"\s*:\s*(true|false|\d+)', blob)
+                        m2 = re.search(rf'"{fname}"\s*:\s*(true|false|\d+)', blob)
                         if m2:
                             v = m2.group(1)
-                            result[field] = True if v == 'true' else False if v == 'false' else int(v)
-                if result:
-                    return result
-                raise ValueError(f"Could not parse JSON from LLM response: {raw[:200]}")
+                            result[fname] = True if v == 'true' else False if v == 'false' else int(v)
+                # Always return something — callers expect a dict, not None
+                if 'public_content' not in result:
+                    result['public_content'] = raw[:400]
+                result.setdefault('q_vector', 'need further information')
+                result.setdefault('k_vector', 'partial response')
+                return result
+
+    # No JSON object found at all — wrap raw text so callers never receive None
+    return {
+        'public_content': raw[:400],
+        'q_vector': 'need further information',
+        'k_vector': 'partial response',
+    }
 
 
 # ── Mock mode — scripted responses (no LLM needed) ────────────────────────────
