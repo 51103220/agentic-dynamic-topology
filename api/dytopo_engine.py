@@ -517,31 +517,52 @@ async def run_dytopo(
                     # Prefer explicit final_answer field; fall back to best worker output
                     final_answer = mgr_raw.get("final_answer", "").strip()
                     if not final_answer:
-                        # Fall back: pick best worker output (longest code block or content)
+                        primary_roles = {"Developer", "Solver"}
                         best = ""
                         for ao in agent_outputs:
-                            if ao.role == "Manager":
-                                continue
-                            if "```" in ao.public_content:
-                                best = ao.public_content
-                                break
-                            if len(ao.public_content) > len(best):
-                                best = ao.public_content
-                        final_answer = best or mgr_raw.get("public_content", "")
+                            if ao.role == "Manager": continue
+                            if ao.role in primary_roles and "```" in ao.public_content:
+                                best = ao.public_content; break
+                        if not best:
+                            for ao in agent_outputs:
+                                if ao.role != "Manager" and "```" in ao.public_content:
+                                    best = ao.public_content; break
+                        if not best:
+                            for ao in agent_outputs:
+                                if ao.role in primary_roles:
+                                    best = ao.public_content; break
+                        if not best:
+                            best = mgr_raw.get("public_content", "")
+                        final_answer = best
             else:
                 # no explicit manager — use heuristic after max_rounds
                 is_complete = round_t >= cfg.max_rounds - 1
                 next_goal = current_goal
                 if is_complete:
-                    # pick best worker: prefer code blocks, then longest content
+                    # Priority: Developer/Solver with code block → any code block → Developer/Solver → longest
+                    primary_roles = {"Developer", "Solver"}
                     best = ""
+                    # 1. Primary role with code block
                     for ao in agent_outputs:
-                        if "```" in ao.public_content:
+                        if ao.role in primary_roles and "```" in ao.public_content:
                             best = ao.public_content
                             break
-                        if len(ao.public_content) > len(best):
-                            best = ao.public_content
-                    final_answer = best or agent_outputs[0].public_content
+                    # 2. Any agent with code block
+                    if not best:
+                        for ao in agent_outputs:
+                            if "```" in ao.public_content:
+                                best = ao.public_content
+                                break
+                    # 3. Primary role content
+                    if not best:
+                        for ao in agent_outputs:
+                            if ao.role in primary_roles:
+                                best = ao.public_content
+                                break
+                    # 4. Longest content
+                    if not best:
+                        best = max(agent_outputs, key=lambda a: len(a.public_content)).public_content
+                    final_answer = best
 
         result = RoundResult(
             round=round_t,
