@@ -559,6 +559,13 @@ async def run_dytopo(
                 if is_complete:
                     final_answer = best_primary_answer or agent_outputs[0].public_content
 
+        # Last round safety net: always emit a final_answer so results are never empty.
+        # Manager may have kept is_complete=False across all rounds — force completion.
+        is_last_round = round_t >= cfg.max_rounds - 1
+        if is_last_round and not final_answer:
+            is_complete = True
+            final_answer = best_primary_answer or agent_outputs[0].public_content
+
         result = RoundResult(
             round=round_t,
             goal=current_goal,
