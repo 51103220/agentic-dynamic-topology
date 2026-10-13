@@ -42,7 +42,8 @@ class DyTopoConfig:
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model: str = "qwen3:8b"
     temperature: float = 0.3
-    max_tokens: int = 1500
+    max_tokens: int = 3000
+    k_in: int = 3                    # §Table 7: max incoming neighbors per agent
 
 
 @dataclass
@@ -57,6 +58,7 @@ class AgentOutput:
     id: int
     role: str
     public_content: str
+    private_content: dict                 # routed only to out-neighbors (§3.2.1)
     q_vector: str          # natural-language query descriptor
     k_vector: str          # natural-language key descriptor
     in_neighbors: list[int] = field(default_factory=list)
@@ -80,6 +82,7 @@ class RoundResult:
                     "id": a.id,
                     "role": a.role,
                     "public_content": a.public_content,
+                    "private_content": a.private_content,
                     "q_vector": a.q_vector,
                     "k_vector": a.k_vector,
                     "in_neighbors": a.in_neighbors,
@@ -104,6 +107,62 @@ def build_adjacency(queries: list[str], keys: list[str], tau: float) -> np.ndarr
     A = (R > tau).astype(int)
     np.fill_diagonal(A, 0)    # no self-loops (1 - δ_ij)
     return A
+
+
+def apply_k_in_cap(A: np.ndarray, R: np.ndarray, k_in: int) -> np.ndarray:
+    """
+    Enforce max in-degree K_in (Table 7): keep only the top-k_in incoming edges
+    per agent ranked by relevance score R[i,j] (i=receiver, j=sender).
+    """
+    A = A.copy()
+    N = A.shape[0]
+    for i in range(N):
+        incoming = np.where(A[:, i] == 1)[0]
+        if len(incoming) > k_in:
+            scores = R[i, incoming]          # R[i,j] = q̂_i · k̂_j  (receiver i, sender j)
+            keep = incoming[np.argsort(scores)[-k_in:]]
+            A[:, i] = 0
+            A[keep, i] = 1
+    return A
+
+
+def build_aggregation_order(A: np.ndarray) -> list[int]:
+    """
+    §3.4: deterministic aggregation order σ(t).
+    Case I (DAG): standard topological sort — provider precedes consumer.
+    Case II (cyclic): greedy heuristic minimising restricted in-degree d_in(i; U).
+    """
+    N = A.shape[0]
+    # Try Kahn's topological sort
+    in_deg = A.sum(axis=0).tolist()   # in_deg[i] = number of incoming edges to i
+    queue = sorted([i for i in range(N) if in_deg[i] == 0])
+    order = []
+    remaining = set(range(N))
+    adj_list = {i: [j for j in range(N) if A[i, j] == 1] for i in range(N)}
+
+    while queue:
+        node = queue.pop(0)
+        order.append(node)
+        remaining.discard(node)
+        for succ in sorted(adj_list[node]):
+            in_deg[succ] -= 1
+            if in_deg[succ] == 0:
+                queue.append(succ)
+
+    if len(order) == N:
+        return order   # DAG — clean topological sort
+
+    # Cyclic graph: greedy cycle-breaking (Eq. 10-11 in paper)
+    # U = unplaced nodes; pick i* = argmin restricted in-degree d_in(i; U)
+    U = sorted(remaining)
+    while U:
+        def restricted_in_deg(i):
+            return sum(1 for j in U if A[j, i] == 1)
+        i_star = min(U, key=lambda i: (restricted_in_deg(i), i))
+        order.append(i_star)
+        U.remove(i_star)
+
+    return order
 
 
 # ── Role definitions (Appendix B) ─────────────────────────────────────────────
@@ -155,7 +214,9 @@ CRITICAL RULES:
 
 def _build_user_prompt(agent: Agent, goal: str, round_t: int,
                         neighbor_msgs: list[tuple[int, str, str]]) -> str:
-    """Build the per-round user prompt (Algorithm 1 line 6 — S_i^(t))."""
+    """Build the per-round user prompt (Algorithm 1 line 6 — S_i^(t)).
+    neighbor_msgs is ordered by aggregation order σ(t) and contains private messages.
+    """
     mem_block = "\n".join(agent.memory[-6:]) if agent.memory else "(empty)"
     lines = [
         f"=== Round {round_t} ===",
@@ -163,7 +224,7 @@ def _build_user_prompt(agent: Agent, goal: str, round_t: int,
         f"Your memory:\n{mem_block}",
     ]
     if neighbor_msgs:
-        lines.append("Messages from neighbors (ordered by relevance):")
+        lines.append("Private messages from neighbors (ordered by relevance):")
         for nid, nrole, msg in neighbor_msgs:
             lines.append(f"  [{nrole} #{nid}]: {msg[:400]}")
     return "\n".join(lines)
@@ -433,6 +494,22 @@ def _initial_goal(cfg: DyTopoConfig, problem: str) -> str:
     return goals[0]
 
 
+# ── Private message formatter ─────────────────────────────────────────────────
+def _format_private(raw: dict, role: str) -> str:
+    """
+    Extract the routable private message from an agent's raw output (§3.2.1).
+    private_content is a dict like {"TargetRole": "Instruction"} or free-form.
+    We concatenate all values; fall back to public_content if private is empty.
+    """
+    priv = raw.get("private_content", {})
+    if isinstance(priv, dict) and priv:
+        return " | ".join(str(v) for v in priv.values())
+    if isinstance(priv, str) and priv.strip():
+        return priv.strip()
+    # fallback: public content (mock mode has no private_content)
+    return raw.get("public_content", "")
+
+
 # ── Algorithm 1 — full DyTopo loop ────────────────────────────────────────────
 async def run_dytopo(
     problem: str,
@@ -454,8 +531,9 @@ async def run_dytopo(
 
     final_answer: str | None = None
     best_primary_answer: str = ""  # tracks best Developer/Solver output across all rounds
-    prev_outputs: list[dict] = []  # previous round outputs for neighbor message passing
-    prev_adjacency: list[list[int]] = []  # previous round adjacency
+    prev_outputs: list[dict] = []        # previous round outputs for private message passing
+    prev_adjacency: list[list[int]] = [] # previous round adjacency (A[j][i]=1 → j→i)
+    prev_sigma: list[int] = []           # previous round aggregation order σ(t-1)
 
     for round_t in range(cfg.max_rounds):
         # ── Phase 1: Single-Pass Inference (all agents in parallel) ──────────
@@ -465,44 +543,67 @@ async def run_dytopo(
                 for a in agents
             ])
         else:
-            # Real LLM: pass neighbor messages from PREVIOUS round based on previous adjacency
-            # This matches Algorithm 1: agent i receives from j where A[j,i]=1 (prev round)
+            # Real LLM: pass PRIVATE messages from PREVIOUS round (§3.2.2 Eq.3).
+            # Agent i receives m_priv,j for each j where A[j,i]=1 in the prev round,
+            # ordered by aggregation order σ(t-1) so insertion is deterministic.
+            def _prev_private_msgs(agent_i: "Agent") -> list[tuple[int, str, str]]:
+                if not prev_adjacency or not prev_outputs:
+                    return []
+                # collect senders j → i
+                senders = [
+                    j for j in range(len(agents))
+                    if prev_adjacency[j][agent_i.id] == 1
+                ]
+                # order by prev aggregation order (earlier in σ = higher priority)
+                senders_ordered = [j for j in prev_sigma if j in senders]
+                return [
+                    (j, agents[j].role,
+                     _format_private(prev_outputs[j], agents[j].role))
+                    for j in senders_ordered
+                ]
+
             outputs_raw = await asyncio.gather(*[
-                call_agent_llm(
-                    a, current_goal, round_t,
-                    [
-                        (j, agents[j].role, prev_outputs[j].get("public_content", ""))
-                        for j in range(len(agents))
-                        if prev_adjacency and prev_adjacency[j][a.id] == 1
-                    ],
-                    cfg,
-                )
+                call_agent_llm(a, current_goal, round_t, _prev_private_msgs(a), cfg)
                 for a in agents
             ])
 
         # ── Phase 2: Topology Induction (Algorithm 1 lines 10-16) ────────────
         queries = [o.get("q_vector", "") for o in outputs_raw]
         keys    = [o.get("k_vector", "") for o in outputs_raw]
-        A = build_adjacency(queries, keys, cfg.tau)
+        Q_vecs = encode(queries)
+        K_vecs = encode(keys)
+        R_mat  = Q_vecs @ K_vecs.T          # (N,N) relevance scores
+        A_raw  = (R_mat > cfg.tau).astype(int)
+        np.fill_diagonal(A_raw, 0)
+        A = apply_k_in_cap(A_raw, R_mat, cfg.k_in)   # §Table 7: K_in=3 cap
 
-        # ── Phase 3: Deterministic Ordering + Phase 4: Memory Update ─────────
+        # ── Phase 3: Deterministic Aggregation Ordering (§3.4) ───────────────
+        sigma = build_aggregation_order(A)             # σ(t): provider before consumer
+
+        # ── Phase 4: Routing & Memory Update (§3.2.2 Eq.3) ──────────────────
         agent_outputs: list[AgentOutput] = []
         for i, (a, raw) in enumerate(zip(agents, outputs_raw)):
             in_neighbors = [j for j in range(len(agents)) if A[j, i] == 1]
+            # order incoming by σ(t) (earlier position = higher priority)
+            in_neighbors_ordered = [j for j in sigma if j in in_neighbors]
 
-            # update memory: own output + neighbor public_content (persists across rounds per §3.3)
-            pub = raw.get("public_content", "")
+            pub  = raw.get("public_content", "")
+            priv = raw.get("private_content", {})
+
+            # Memory update: own public + neighbors' PRIVATE messages (Eq.3)
             a.memory.append(f"Round {round_t} self: {pub[:200]}")
-            for j in in_neighbors:
-                a.memory.append(f"Round {round_t} from {agents[j].role}: {outputs_raw[j].get('public_content','')[:200]}")
+            for j in in_neighbors_ordered:
+                priv_j = _format_private(outputs_raw[j], agents[j].role)
+                a.memory.append(f"Round {round_t} from {agents[j].role}: {priv_j[:200]}")
 
             agent_outputs.append(AgentOutput(
                 id=i,
                 role=a.role,
                 public_content=pub,
+                private_content=priv if isinstance(priv, dict) else {},
                 q_vector=queries[i],
                 k_vector=keys[i],
-                in_neighbors=in_neighbors,
+                in_neighbors=in_neighbors_ordered,
             ))
 
         # ── Phase 5: Manager Control (Algorithm 1 lines 24-27) ───────────────
@@ -578,6 +679,7 @@ async def run_dytopo(
         # Store for next round's neighbor message passing (Algorithm 1)
         prev_outputs = outputs_raw
         prev_adjacency = A.tolist()
+        prev_sigma = sigma
 
         yield result
 
