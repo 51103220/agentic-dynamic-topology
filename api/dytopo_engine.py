@@ -541,6 +541,29 @@ async def run_dytopo(
     goals = _MOCK_GOALS.get(cfg.task_type, _MOCK_GOALS["code"])
     current_goal = goals[0]
 
+    def _clean_answer(text: str) -> str:
+        """Unwrap JSON/markdown wrappers so final_answer is always plain text or a code block."""
+        if not text:
+            return text
+        t = text.strip()
+        # unwrap ```json ... ``` blocks
+        if t.startswith("```json"):
+            m = re.search(r'```json\s*\n?(.*?)```', t, re.DOTALL)
+            if m:
+                try:
+                    inner = json.loads(m.group(1))
+                    t = inner.get("public_content") or inner.get("answer") or inner.get("content") or t
+                except Exception:
+                    pass
+        # unwrap bare JSON objects {"public_content": ...}
+        if t.startswith("{"):
+            try:
+                inner = json.loads(t)
+                t = inner.get("public_content") or inner.get("answer") or inner.get("content") or t
+            except Exception:
+                pass
+        return t.strip() if isinstance(t, str) else text
+
     final_answer: str | None = None
     best_primary_answer: str = ""  # tracks best Developer/Solver output across all rounds
     prev_outputs: list[dict] = []        # previous round outputs for private message passing
@@ -678,22 +701,22 @@ async def run_dytopo(
                 next_goal = mgr_raw.get("next_goal", current_goal)
                 if is_complete:
                     # Prefer explicit final_answer field; fall back to best primary role output
-                    final_answer = mgr_raw.get("final_answer", "").strip()
+                    final_answer = _clean_answer(mgr_raw.get("final_answer", "").strip())
                     if not final_answer:
-                        final_answer = best_primary_answer or mgr_raw.get("public_content", "")
+                        final_answer = _clean_answer(best_primary_answer or mgr_raw.get("public_content", ""))
             else:
                 # no explicit manager — use heuristic after max_rounds
                 is_complete = round_t >= cfg.max_rounds - 1
                 next_goal = current_goal  # no goal progression without Manager
                 if is_complete:
-                    final_answer = best_primary_answer or agent_outputs[0].public_content
+                    final_answer = _clean_answer(best_primary_answer or agent_outputs[0].public_content)
 
         # Last round safety net: always emit a final_answer so results are never empty.
         # Manager may have kept is_complete=False across all rounds — force completion.
         is_last_round = round_t >= cfg.max_rounds - 1
         if is_last_round and not final_answer:
             is_complete = True
-            final_answer = best_primary_answer or agent_outputs[0].public_content
+            final_answer = _clean_answer(best_primary_answer or agent_outputs[0].public_content)
 
         result = RoundResult(
             round=round_t,
