@@ -41,6 +41,7 @@ class DyTopoConfig:
     mock_mode: bool = True
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model: str = "qwen3:8b"
+    llm_api_key: str = ""            # set for Hyperspace/OpenAI; leave empty for local vLLM
     temperature: float = 0.3
     max_tokens: int = 3000
     k_in: int = 3                    # §Table 7: max incoming neighbors per agent
@@ -62,6 +63,8 @@ class AgentOutput:
     q_vector: str          # natural-language query descriptor
     k_vector: str          # natural-language key descriptor
     in_neighbors: list[int] = field(default_factory=list)
+    tokens_in: int = 0     # prompt tokens from API usage field
+    tokens_out: int = 0    # completion tokens from API usage field
 
 
 @dataclass
@@ -72,6 +75,8 @@ class RoundResult:
     adjacency: list[list[int]]
     is_complete: bool
     final_answer: str | None = None
+    tokens_in: int = 0     # total prompt tokens this round (all agents + manager)
+    tokens_out: int = 0    # total completion tokens this round
 
     def to_dict(self) -> dict:
         return {
@@ -86,12 +91,16 @@ class RoundResult:
                     "q_vector": a.q_vector,
                     "k_vector": a.k_vector,
                     "in_neighbors": a.in_neighbors,
+                    "tokens_in": a.tokens_in,
+                    "tokens_out": a.tokens_out,
                 }
                 for a in self.agents
             ],
             "adjacency": self.adjacency,
             "is_complete": self.is_complete,
             "final_answer": self.final_answer,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
         }
 
 
@@ -258,25 +267,27 @@ async def call_agent_llm(
         "stream": False,
     }
 
+    headers = {"Authorization": f"Bearer {cfg.llm_api_key}"} if cfg.llm_api_key else {}
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(f"{cfg.llm_base_url}/chat/completions", json=payload)
+        resp = await client.post(f"{cfg.llm_base_url}/chat/completions", json=payload, headers=headers)
         resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
+        resp_json = resp.json()
+        raw = resp_json["choices"][0]["message"]["content"]
+        usage = resp_json.get("usage", {})
+        _tokens_in  = usage.get("prompt_tokens", 0)
+        _tokens_out = usage.get("completion_tokens", 0)
 
     # extract JSON from potentially-markdown-wrapped response
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if json_match:
         blob = json_match.group()
         try:
-            return json.loads(blob)
+            result = json.loads(blob)
         except json.JSONDecodeError:
-            # LLM put raw LaTeX in JSON strings (e.g. \sqrt, \frac) which are
-            # invalid JSON escapes. Fix by replacing lone backslashes with \\
             fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', blob)
             try:
-                return json.loads(fixed)
+                result = json.loads(fixed)
             except json.JSONDecodeError:
-                # Last resort: extract fields with regex directly from raw text
                 result = {}
                 for fname in ('answer', 'query', 'key', 'public_content', 'is_complete', 'final_answer'):
                     m = re.search(rf'"{fname}"\s*:\s*"(.*?)"(?=\s*[,}}])', blob, re.DOTALL)
@@ -287,18 +298,19 @@ async def call_agent_llm(
                         if m2:
                             v = m2.group(1)
                             result[fname] = True if v == 'true' else False if v == 'false' else int(v)
-                # Always return something — callers expect a dict, not None
                 if 'public_content' not in result:
                     result['public_content'] = raw[:400]
                 result.setdefault('q_vector', 'need further information')
                 result.setdefault('k_vector', 'partial response')
-                return result
+        result['_usage'] = {'tokens_in': _tokens_in, 'tokens_out': _tokens_out}
+        return result
 
-    # No JSON object found at all — wrap raw text so callers never receive None
+    # No JSON object found at all
     return {
         'public_content': raw[:400],
         'q_vector': 'need further information',
         'k_vector': 'partial response',
+        '_usage': {'tokens_in': _tokens_in, 'tokens_out': _tokens_out},
     }
 
 
@@ -589,6 +601,7 @@ async def run_dytopo(
 
             pub  = raw.get("public_content", "")
             priv = raw.get("private_content", {})
+            usage = raw.pop("_usage", {})
 
             # Memory update: own public + neighbors' PRIVATE messages (Eq.3)
             a.memory.append(f"Round {round_t} self: {pub[:200]}")
@@ -604,6 +617,8 @@ async def run_dytopo(
                 q_vector=queries[i],
                 k_vector=keys[i],
                 in_neighbors=in_neighbors_ordered,
+                tokens_in=usage.get("tokens_in", 0),
+                tokens_out=usage.get("tokens_out", 0),
             ))
 
         # ── Phase 5: Manager Control (Algorithm 1 lines 24-27) ───────────────
@@ -674,6 +689,8 @@ async def run_dytopo(
             adjacency=A.tolist(),
             is_complete=is_complete,
             final_answer=final_answer if is_complete else None,
+            tokens_in=sum(ao.tokens_in for ao in agent_outputs),
+            tokens_out=sum(ao.tokens_out for ao in agent_outputs),
         )
 
         # Store for next round's neighbor message passing (Algorithm 1)
