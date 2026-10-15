@@ -624,16 +624,29 @@ async def run_dytopo(
         # ── Phase 5: Manager Control (Algorithm 1 lines 24-27) ───────────────
         # Track best primary role output across all rounds
         primary_roles = {"Developer", "Solver"}
+
+        def _unwrap_content(text: str) -> str:
+            """Strip JSON wrapper if LLM returned a dict instead of plain text."""
+            t = text.strip()
+            if t.startswith("{"):
+                try:
+                    inner = json.loads(t)
+                    t = inner.get("public_content") or inner.get("answer") or inner.get("content") or text
+                except Exception:
+                    pass
+            return t
+
         for ao in agent_outputs:
             if ao.role in primary_roles:
+                content = _unwrap_content(ao.public_content)
                 # For code tasks: prefer code blocks; always update to latest
-                if "```" in ao.public_content:
-                    best_primary_answer = ao.public_content
+                if "```" in content:
+                    best_primary_answer = content
                 elif not best_primary_answer:
-                    best_primary_answer = ao.public_content
+                    best_primary_answer = content
                 # For math tasks: always update to latest Solver output (last round = most refined)
                 elif cfg.task_type == "math" and ao.role == "Solver":
-                    best_primary_answer = ao.public_content
+                    best_primary_answer = content
 
         # In mock mode: use scripted completion logic
         # In real mode: manager agent decides
