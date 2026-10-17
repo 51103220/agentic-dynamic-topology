@@ -45,6 +45,7 @@ class DyTopoConfig:
     temperature: float = 0.3
     max_tokens: int = 3000
     k_in: int = 3                    # §Table 7: max incoming neighbors per agent
+    no_think: bool = False           # prepend /no_think to disable Qwen3 thinking mode
 
 
 @dataclass
@@ -256,6 +257,8 @@ async def call_agent_llm(
             description=ROLE_DESCRIPTIONS.get(agent.role, agent.role),
         )
     )
+    if cfg.no_think:
+        system = "/no_think\n" + system
     user = _build_user_prompt(agent, goal, round_t, neighbor_msgs)
 
     payload = {
