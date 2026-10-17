@@ -271,7 +271,7 @@ async def call_agent_llm(
     }
 
     headers = {"Authorization": f"Bearer {cfg.llm_api_key}"} if cfg.llm_api_key else {}
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(f"{cfg.llm_base_url}/chat/completions", json=payload, headers=headers)
         resp.raise_for_status()
         resp_json = resp.json()
