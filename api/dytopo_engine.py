@@ -630,10 +630,10 @@ async def run_dytopo(
             usage = raw.pop("_usage", {})
 
             # Memory update: own public + neighbors' PRIVATE messages (Eq.3)
-            a.memory.append(f"Round {round_t} self: {pub[:200]}")
+            a.memory.append(f"Round {round_t} self: {pub[:500]}")
             for j in in_neighbors_ordered:
                 priv_j = _format_private(outputs_raw[j], agents[j].role)
-                a.memory.append(f"Round {round_t} from {agents[j].role}: {priv_j[:200]}")
+                a.memory.append(f"Round {round_t} from {agents[j].role}: {priv_j[:500]}")
 
             agent_outputs.append(AgentOutput(
                 id=i,
@@ -665,14 +665,18 @@ async def run_dytopo(
         for ao in agent_outputs:
             if ao.role in primary_roles:
                 content = _unwrap_content(ao.public_content)
-                # For code tasks: prefer code blocks; always update to latest
-                if "```" in content:
-                    best_primary_answer = content
-                elif not best_primary_answer:
-                    best_primary_answer = content
-                # For math tasks: always update to latest Solver output (last round = most refined)
-                elif cfg.task_type == "math" and ao.role == "Solver":
-                    best_primary_answer = content
+                if cfg.task_type == "math":
+                    # always take latest Solver output (most refined answer)
+                    if ao.role == "Solver" and content:
+                        best_primary_answer = content
+                    elif not best_primary_answer and content:
+                        best_primary_answer = content
+                else:
+                    # code: prefer explicit code blocks, but accept any non-empty content
+                    if "```" in content:
+                        best_primary_answer = content
+                    elif not best_primary_answer and content:
+                        best_primary_answer = content
 
         # In mock mode: use scripted completion logic
         # In real mode: manager agent decides
