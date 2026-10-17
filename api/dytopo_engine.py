@@ -272,8 +272,14 @@ async def call_agent_llm(
 
     headers = {"Authorization": f"Bearer {cfg.llm_api_key}"} if cfg.llm_api_key else {}
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(f"{cfg.llm_base_url}/chat/completions", json=payload, headers=headers)
-        resp.raise_for_status()
+        for _attempt in range(5):
+            resp = await client.post(f"{cfg.llm_base_url}/chat/completions", json=payload, headers=headers)
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("retry-after", 10))
+                await asyncio.sleep(retry_after)
+                continue
+            resp.raise_for_status()
+            break
         resp_json = resp.json()
         raw = resp_json["choices"][0]["message"]["content"]
         usage = resp_json.get("usage", {})
